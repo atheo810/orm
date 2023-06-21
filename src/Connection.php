@@ -4,6 +4,7 @@ namespace Atheo\Orm;
 
 use PDO;
 use PDOStatement;
+use PDOException;
 use Serializable;
 
 class Connection implements Serializable
@@ -256,5 +257,341 @@ class Connection implements Serializable
         $this->compilerOptions['wrapper'] = $wrapper;
         $this->schemaCompilerOptions['wrapper'] = $wrapper;
         return $this;
+    }
+
+    /**
+     * Returns the DSN associated with this connection
+     *
+     * @return string
+     */
+    public function getDSN()
+    {
+        return $this->dsn;
+    }
+
+    /**
+     * Returns the driver's name
+     *
+     * @return string
+     */
+    public function getDriver()
+    {
+        if ($this->driver === null) {
+            $this->driver = $this->getPDO()->getAttribute(PDO::ATTR_DRIVER_NAME);
+        }
+
+        return $this->driver;
+    }
+
+    /**
+     * Returns the schema associated with this connection
+     *
+     * @return Schema
+     */
+    public function getSchema(): Schema
+    {
+        if ($this->schema === null) {
+            $this->schema = new Schema($this);
+        }
+
+        return $this->schema;
+    }
+
+    /**
+     * Returns the PDO object associated with this connection
+     *
+     * @return PDO
+     */
+    public function getPDO(): PDO
+    {
+        if ($this->pdo == null) {
+            $this->pdo = new PDO($this->getDSN(), $this->username, $this->password, $this->options);
+
+            foreach ($this->commands as $command) {
+                $this->command($command['sql'], $command['params']);
+            }
+        }
+
+        return $this->pdo;
+    }
+
+    public function getCompiler(): SQL\Compiler
+    {
+        if ($this->compiler === null) {
+            switch ($this->getDriver()) {
+                case 'mysql':
+                    $this->compiler = new SQL\Compiler\MySQL();
+                    break;
+                case 'dblib':
+                case 'mssql':
+                case 'sqlsrv':
+                case 'sybase':
+                    $this->compiler = new SQL\Compiler\SQLServer();
+                    break;
+                case 'oci':
+                case 'oracle':
+                    $this->compiler = new SQL\Compiler\Oracle();
+                    break;
+                case 'firebird':
+                    $this->compiler = new SQL\Compiler\Firebird();
+                    break;
+                case 'db2':
+                case 'ibm':
+                case 'odbc':
+                    $this->compiler = new SQL\Compiler\DB2();
+                    break;
+                case 'nuodb':
+                    $this->compiler = new SQL\Compiler\NuoDB();
+                    break;
+                default:
+                    $this->compiler = new SQL\Compiler();
+            }
+
+            $this->compiler->setOptions($this->compilerOptions);
+        }
+
+        return $this->compiler;
+    }
+
+    /**
+     * Close the current connection by destroying the associated PDO object
+     */
+    public function disconnect()
+    {
+        $this->pdo = null;
+    }
+
+    /**
+     * Returns the query log for this database.
+     *
+     * @return  array
+     */
+    public function getLog(): array
+    {
+        return $this->log;
+    }
+
+    /**
+     * Execute a non-query SQL command
+     *
+     * @param string $sql SQL Command
+     * @param array $params (optional) Command params
+     *
+     * @return mixed Command result
+     */
+    public function command(string $sql, array $params = [])
+    {
+        return $this->execute($this->prepare($sql, $params));
+    }
+
+    /**
+     * Execute a query and return the number of affected rows
+     *
+     * @param string $sql SQL Query
+     * @param array $params (optional) Query params
+     *
+     * @return int
+     */
+    public function count(string $sql, array $params = [])
+    {
+        $prepared = $this->prepare($sql, $params);
+        $this->execute($prepared);
+        $result = $prepared['statement']->rowCount();
+        $prepared['statement']->closeCursor();
+        return $result;
+    }
+
+    /**
+     * Execute a query and fetch the first column
+     *
+     * @param string $sql SQL Query
+     * @param array $params (optional) Query params
+     *
+     * @return mixed
+     */
+    public function column(string $sql, array $params = [])
+    {
+        $prepared = $this->prepare($sql, $params);
+        $this->execute($prepared);
+        $result = $prepared['statement']->fetchColumn();
+        $prepared['statement']->closeCursor();
+        return $result;
+    }
+
+    /**
+     * Transaction
+     *
+     * @param callable $callback
+     * @param mixed|null $that
+     * @param mixed|null $default
+     * @return mixed|null
+     * @throws PDOException
+     */
+    public function transaction(callable $callback, $that = null, $default = null)
+    {
+        if ($that === null) {
+            $that = $this;
+        }
+
+        $pdo = $this->getPDO();
+
+        if ($pdo->inTransaction()) {
+            return $callback($that);
+        }
+
+        $result = $default;
+
+        try {
+            $pdo->beginTransaction();
+            $result = $callback($that);
+            $pdo->commit();
+        } catch (PDOException $exception) {
+            $pdo->rollBack();
+            if ($this->throwTransactionExceptions) {
+                throw $exception;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Replace placeholders with parameters.
+     *
+     * @param string $query SQL query
+     * @param array $params Query parameters
+     *
+     * @return  string
+     */
+    protected function replaceParams(string $query, array $params): string
+    {
+        $compiler = $this->getCompiler();
+
+        return preg_replace_callback('/\?/', function () use (&$params, $compiler) {
+            $param = array_shift($params);
+            $param = is_object($param) ? get_class($param) : $param;
+
+            if (is_int($param) || is_float($param)) {
+                return $param;
+            } elseif ($param === null) {
+                return 'NULL';
+            } elseif (is_bool($param)) {
+                return $param ? 'TRUE' : 'FALSE';
+            } else {
+                return $compiler->quote($param);
+            }
+        }, $query);
+    }
+
+    /**
+     * Prepares a query.
+     *
+     * @param   string $query SQL query
+     * @param   array $params Query parameters
+     *
+     * @return  array
+     */
+    protected function prepare(string $query, array $params): array
+    {
+        try {
+            $statement = $this->getPDO()->prepare($query);
+        } catch (PDOException $e) {
+            throw new PDOException(
+                $e->getMessage() . ' [ ' . $this->replaceParams($query, $params) . ' ] ',
+                (int)$e->getCode(),
+                $e->getPrevious()
+            );
+        }
+
+        return ['query' => $query, 'params' => $params, 'statement' => $statement];
+    }
+
+    /**
+     * Executes a prepared query and returns TRUE on success or FALSE on failure.
+     *
+     * @param   array $prepared Prepared query
+     *
+     * @return  boolean
+     */
+    protected function execute(array $prepared)
+    {
+        if ($this->logQueries) {
+            $start = microtime(true);
+            $log = [
+                'query' => $this->replaceParams($prepared['query'], $prepared['params']),
+            ];
+            $this->log[] = &$log;
+        }
+
+        try {
+            if ($prepared['params']) {
+                $this->bindValues($prepared['statement'], $prepared['params']);
+            }
+            $result = $prepared['statement']->execute();
+        } catch (PDOException $e) {
+            throw new PDOException($e->getMessage() . ' [ ' . $this->replaceParams(
+                $prepared['query'],
+                $prepared['params']
+            ) . ' ] ', (int)$e->getCode(), $e->getPrevious());
+        }
+
+        if ($this->logQueries) {
+            /** @noinspection PhpUndefinedVariableInspection */
+            $log['time'] = microtime(true) - $start;
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param PDOStatement $statement
+     * @param array $values
+     */
+    protected function bindValues(PDOStatement $statement, array $values)
+    {
+        foreach ($values as $key => $value) {
+            $param = PDO::PARAM_STR;
+
+            if (is_null($value)) {
+                $param = PDO::PARAM_NULL;
+            } elseif (is_integer($value)) {
+                $param = PDO::PARAM_INT;
+            } elseif (is_bool($value)) {
+                $param = PDO::PARAM_BOOL;
+            }
+
+            $statement->bindValue($key + 1, $value, $param);
+        }
+    }
+
+    /**
+     * Implementation of Serializable::serialize
+     *
+     * @return  string
+     */
+    public function serialize()
+    {
+        return serialize([
+            'username' => $this->username,
+            'password' => $this->password,
+            'logQueries' => $this->logQueries,
+            'options' => $this->options,
+            'commands' => $this->commands,
+            'dsn' => $this->dsn,
+        ]);
+    }
+
+    /**
+     * Implementation of Serializable::unserialize
+     *
+     * @param   string $data Serialized data
+     */
+    public function unserialize($data)
+    {
+        $object = unserialize($data);
+
+        foreach ($object as $key => $value) {
+            $this->{$key} = $value;
+        }
     }
 }
