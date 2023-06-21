@@ -22,122 +22,164 @@ class QueryBuilder
     protected $table;
 
     /**
-     * @var array $columns
+     * @var array $select
      */
-    protected $columns = [];
+    protected $select = [];
 
     /**
-     * @var array $conditions
+     * @var string $from
      */
-    protected $conditions = [];
+    protected $from = '';
 
     /**
-     * @var array $orderBy
+     * @var array $join
      */
-    protected $orderBy = [];
+    protected $join = [];
 
-    public function __construct(Connection $connection, $table)
+    /**
+     * @var array $where
+     */
+    protected $where = [];
+
+    /**
+     * @var string $orderBy
+     */
+    protected $orderBy = '';
+
+    /**
+     * @var string $limit
+     */
+    protected $limit = '';
+
+    /**
+     * @var array $params
+     */
+    protected $params = [];
+
+    /**
+     * QueryBuilder constructor.
+     *
+     * @param string $table
+     * @param PDO $connection
+     */
+    public function __construct(string $table, PDO $connection)
     {
-        $this->connection = $connection;
         $this->table = $table;
+        $this->connection = $connection;
     }
 
     /**
+     * Set the columns to be selected.
+     *
      * @param array $columns
      * @return QueryBuilder
      */
-    public function select($columns = [])
+    public function select(array $columns = ['*']):QueryBuilder
     {
-        if (!empty($columns)) {
-            $this->columns = $columns;
-        }
+        $this->select = $columns;
         return $this;
     }
 
     /**
+     * Set the table to select from.
+     *
+     * @param string $table
      * @return QueryBuilder
      */
-    public function where($column, $operator, $value)
+    public function from(string $table):QueryBuilder
     {
-        $this->conditions[] = [
-            'column' => $column,
-            'operator' => $operator,
-            'value' => $value,
-        ];
-
+        $this->from = $table;
         return $this;
     }
 
     /**
+     * Add a join clause to the query.
+     *
+     * @param string $table
+     * @param string $column1
+     * @param string $operator
+     * @param string $column2
+     * @return QueryBuilder
+     */
+    public function join(string $table, string $column1, string $operator, string $column2):QueryBuilder
+    {
+        $this->join[] = "JOIN {$table} ON {$column1} {$operator} {$column2}";
+        return $this;
+    }
+
+    /**
+     * Add a where clause to the query.
+     *
+     * @param string $column
+     * @param string $operator
+     * @param mixed $value
+     * @return QueryBuilder
+     */
+    public function where(string $column, string $operator, $value):QueryBuilder
+    {
+        $this->where[] = "{$column} {$operator} ?";
+        $this->params[] = $value;
+        return $this;
+    }
+
+    /**
+     * Add an order by clause to the query.
+     *
+     * @param string $column
      * @param string $direction
-     * 
      * @return QueryBuilder
      */
-    public function orderBy($column, $direction = 'ASC')
+    public function orderBy(string $column, string $direction = 'ASC'):QueryBuilder
     {
-        $this->orderBy[] = [
-            'column' => $column,
-            'direction' => $direction
-        ];
+        $this->orderBy = "{$column} {$direction}";
         return $this;
     }
 
-    public function get()
+    /**
+     * Add a limit clause to the query.
+     *
+     * @param int $limit
+     * @return QueryBuilder
+     */
+    public function limit(int $limit):QueryBuilder
     {
-        $query = $this->buildQuery();
-        $params = $this->buildParams();
-
-        try {
-            $statement = $this->connection->prepare($query);
-            $statement->execute($params);
-            return $statement->fetchAll(PDO::FETCH_ASSOC);
-        } catch (PDOException $exception) {
-            throw $exception;
-        }
+        $this->limit = $limit;
+        return $this;
     }
 
     /**
-     * @return string
+     * Execute the query and return the result.
+     *
+     * @return array
+     * @throws PDOException
      */
-    protected function buildQuery(): string
+    public function get(): array
     {
-        $query = "SELECT ";
+        $columns = implode(', ', $this->select);
+        $query = "SELECT {$columns} FROM {$this->table} {$this->from}";
 
-        if (!empty($this->columns)) {
-            $query .= implode(", ", $this->columns);
-        } else {
-            $query .= "*";
+        if (!empty($this->join)) {
+            $query .= ' ' . implode(' ', $this->join);
         }
 
-        $query .= " FROM " . $this->table;
-
-        if (!empty($this->conditions)) {
-            $query .= " WHERE ";
-            $conditions = [];
-            foreach ($this->conditions as $condition) {
-                $conditions[] = "{$condition['column']} {$condition['operator']} ?";
-            }
-            $query .= implode(" AND ", $conditions);
+        if (!empty($this->where)) {
+            $query .= ' WHERE ' . implode(' AND ', $this->where);
         }
 
         if (!empty($this->orderBy)) {
-            $query .= " ORDER BY ";
-            $orderBy = [];
-            foreach ($this->orderBy as $order) {
-                $orderBy[] = "{$order['column']} {$order['direction']}";
-            }
-            $query .= implode(", ", $orderBy);
+            $query .= ' ORDER BY ' . $this->orderBy;
         }
 
-        return $query;
-    }
-
-    protected function buildParams()
-    {
-        $params = [];
-        foreach ($this->conditions as $condition) {
-            $params[] = $condition['value'];
+        if (!empty($this->limit)) {
+            $query .= ' LIMIT ' . $this->limit;
         }
-        return $params;
+
+        try {
+            $statement = $this->connection->prepare($query);
+            $statement->execute($this->params);
+            return $statement->fetchAll();
+        } catch (PDOException $exception) {
+            throw $exception;
+        }
     }
 }
