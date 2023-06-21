@@ -1,6 +1,6 @@
 {
     "name": "atheo/orm",
-    "description": "Database Abstraction layer",
+    "description": "ORM Database PHP",
     "type": "library",
     "license": "MIT",
     "autoload": {

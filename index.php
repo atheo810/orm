@@ -1,0 +1,4 @@
+<?php 
+
+
+$variable = 1;
